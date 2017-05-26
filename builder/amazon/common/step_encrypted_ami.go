@@ -34,12 +34,15 @@ func (s *StepCreateEncryptedAMICopy) Run(state multistep.StateBag) multistep.Ste
 	ui.Say("Creating Encrypted AMI Copy")
 
 	amis := state.Get("amis").(map[string]string)
-	var region, id string
+	var encSnapshots []string
+	var region, id, reg_id string
+	snapshots := state.Get("snapshots").(map[string][]string)
 	if amis != nil {
 		for region, id = range amis {
 			ui.Say(fmt.Sprintf("Copying AMI: %s(%s)", region, id))
 
-			if reg_key_id, key_present := RegionKeyIds[region]; key_present {
+			// Figure out what key we're encrypting with
+			if reg_key_id, key_present := s.RegionKeyIds[region]; key_present {
 				if reg_key_id != "" {
 					reg_id := reg_key_id
 					ui.Say(fmt.Sprintf("Encrypting with KMS Key ID: %s", reg_id))
@@ -47,10 +50,13 @@ func (s *StepCreateEncryptedAMICopy) Run(state multistep.StateBag) multistep.Ste
 			} else if kmsKeyId != "" {
 				reg_id := kmsKeyId
 				ui.Say(fmt.Sprintf("Encrypting with KMS Key ID: %s", reg_id))
+			} else {
+				reg_id = kmsKeyId
 			}
 
 			ui.Say(fmt.Sprintf("Encrypting with KMS Key ID: %s", kmsKeyId))
 
+			// Send command to copy image
 			copyOpts := &ec2.CopyImageInput{
 				Name:          &s.Name, // Try to overwrite existing AMI
 				SourceImageId: aws.String(id),
@@ -92,7 +98,6 @@ func (s *StepCreateEncryptedAMICopy) Run(state multistep.StateBag) multistep.Ste
 				return multistep.ActionHalt
 			}
 			encImage := encImagesResp.Images[0]
-			var encSnapshots []string
 			for _, blockDevice := range encImage.BlockDeviceMappings {
 				if blockDevice.Ebs != nil && blockDevice.Ebs.SnapshotId != nil {
 					encSnapshots = append(encSnapshots, *blockDevice.Ebs.SnapshotId)
@@ -105,6 +110,7 @@ func (s *StepCreateEncryptedAMICopy) Run(state multistep.StateBag) multistep.Ste
 			state.Put("amis", amis)
 			state.Put("snapshots", snapshots)
 
+			// Check that image is there
 			imagesResp, err := ec2conn.DescribeImages(&ec2.DescribeImagesInput{ImageIds: []*string{copyResp.ImageId}})
 			if err != nil {
 				err := fmt.Errorf("Error searching for AMI: %s", err)
@@ -136,7 +142,6 @@ func (s *StepCreateEncryptedAMICopy) Run(state multistep.StateBag) multistep.Ste
 
 	// Remove associated unencrypted snapshot(s)
 	ui.Say("Deleting unencrypted snapshots")
-	snapshots := state.Get("snapshots").(map[string][]string)
 
 	for _, blockDevice := range unencImage.BlockDeviceMappings {
 		if blockDevice.Ebs != nil && blockDevice.Ebs.SnapshotId != nil {
@@ -155,7 +160,7 @@ func (s *StepCreateEncryptedAMICopy) Run(state multistep.StateBag) multistep.Ste
 }
 
 func (s *StepCreateEncryptedAMICopy) Cleanup(state multistep.StateBag) {
-	for region, im := range s.image {
+	for _, im := range s.image {
 		if im == nil {
 			continue
 		}
